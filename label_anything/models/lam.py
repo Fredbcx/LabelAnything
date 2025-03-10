@@ -1,4 +1,5 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Versione con ottimizzazione di gestione della Memoria
+# Copyright (c) Meta Platforms, Inc. and affiliates.  #last tried
 # All rights reserved.
 
 # This source code is licensed under the license found in the
@@ -10,6 +11,15 @@ import torch
 from einops import rearrange
 from torch import nn
 from torch.nn import functional as F
+from torch import optim
+import gc
+import psutil
+import torch
+import torch.nn as nn
+from torch import optim
+import torch.nn.functional as F
+from einops import rearrange
+
 
 from label_anything.data.utils import BatchKeys, get_preprocess_shape
 from label_anything.models.transformer import TwoWayTransformer
@@ -546,3 +556,161 @@ class MultiLevelLam(Lam):
             raise ValueError("Either 'images' or 'embeddings' must be provided.")
 
         return embeddings
+
+
+# Versione con ottimizzazione di gestione della Memoria
+class OptimizedLam(Lam):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_iterations = kwargs.get('num_iterations', 2)
+        self.learning_rate = kwargs.get('learning_rate', 0.1)
+        self.debug = True  # Flag per abilitare/disabilitare debug
+
+    def print_memory_usage(self, message=""):
+        if not self.debug:
+            return
+        process = psutil.Process()
+        print(f"\n{message}")
+        print(f"RAM usage: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+        if torch.cuda.is_available():
+            print(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024 / 1024:.2f} MB")
+            print(f"GPU memory reserved: {torch.cuda.memory_reserved() / 1024 / 1024:.2f} MB")
+
+    def print_tensor_info(self, tensor, name):
+        if not self.debug:
+            return
+        print(f"\n{name}:")
+        print(f"Shape: {tensor.shape}")
+        print(f"Type: {tensor.dtype}")
+        print(f"Device: {tensor.device}")
+        print(f"Requires grad: {tensor.requires_grad}")
+        if tensor.requires_grad:
+            print(f"Grad shape: {tensor.grad.shape if tensor.grad is not None else None}")
+
+    def forward(self, batched_input):
+        self.print_memory_usage("Starting forward pass")
+        print("\nInput batch info:")
+        for k, v in batched_input.items():
+            if isinstance(v, torch.Tensor):
+                print(f"{k}: shape {v.shape}, dtype {v.dtype}")
+
+        with torch.set_grad_enabled(True):
+            # Primo forward pass
+            print("\nExecuting initial forward pass...")
+            seg, pe_result = self._forward(batched_input)
+            self.print_tensor_info(seg, "Initial segmentation")
+            self.print_tensor_info(pe_result[ResultDict.CLASS_EMBS], "Initial class embeddings")
+            self.print_memory_usage("After initial forward")
+
+            # Pulizia memoria
+            del seg
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            self.print_memory_usage("After cleanup")
+
+            # Preparazione per ottimizzazione
+            print("\nPreparing for optimization...")
+            optimized_pe_result = {
+                k: v.clone().detach() for k, v in pe_result.items()
+            }
+            optimized_pe_result[ResultDict.CLASS_EMBS].requires_grad_(True)
+            self.print_tensor_info(
+                optimized_pe_result[ResultDict.CLASS_EMBS], 
+                "Optimizable class embeddings"
+            )
+
+            del pe_result
+            gc.collect()
+
+            optimizer = optim.Adam([optimized_pe_result[ResultDict.CLASS_EMBS]], 
+                                 lr=self.learning_rate)
+
+            # Loop di ottimizzazione
+            for iteration in range(self.num_iterations):
+                print(f"\n{'='*20} Iteration {iteration + 1} {'='*20}")
+                self.print_memory_usage(f"Start iteration {iteration + 1}")
+
+                optimizer.zero_grad(set_to_none=True)
+
+                # Forward pass
+                print("\nComputing forward pass...")
+                new_seg = self._forward_with_embeddings(batched_input, optimized_pe_result)
+                self.print_tensor_info(new_seg, "New segmentation")
+
+                # Loss calculation
+                print("\nCalculating loss...")
+                input_for_loss = new_seg.view(-1, new_seg.size(1))
+                target_for_loss = batched_input["ground_truth_mask"].view(-1)
+                
+                loss = F.cross_entropy(input_for_loss, target_for_loss)
+                loss_value = loss.item()
+                print(f"Loss value: {loss_value}")
+
+                # Backward pass
+                print("\nExecuting backward pass...")
+                loss.backward()
+                self.print_tensor_info(
+                    optimized_pe_result[ResultDict.CLASS_EMBS], 
+                    "Class embeddings after backward"
+                )
+
+                # Optimization step
+                print("\nOptimizer step...")
+                optimizer.step()
+
+                # Cleanup
+                print("\nCleaning up memory...")
+                del new_seg, input_for_loss, loss
+                gc.collect()
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                
+                self.print_memory_usage(f"End iteration {iteration + 1}")
+
+        # Final segmentation
+        print("\nComputing final segmentation...")
+        with torch.no_grad():
+            final_seg = self._forward_with_embeddings(batched_input, optimized_pe_result)
+            final_seg = self.postprocess_masks(final_seg, batched_input["dims"])
+            
+            if "flag_gts" in batched_input:
+                final_seg[batched_input["flag_gts"].logical_not()] = -1 * torch.inf
+
+        self.print_memory_usage("End of forward pass")
+        
+        return {
+            ResultDict.LOGITS: final_seg,
+            ResultDict.CLASS_EMBS: optimized_pe_result[ResultDict.CLASS_EMBS],
+        }
+
+    def _forward_with_embeddings(self, batched_input, pe_result):
+        print("\nExecuting _forward_with_embeddings...")
+        
+        print("Preparing embeddings...")
+        query_embeddings, prompt_embeddings = self.prepare_query_example_embeddings(batched_input)
+        self.print_tensor_info(query_embeddings, "Query embeddings")
+        self.print_tensor_info(prompt_embeddings, "Prompt embeddings")
+        
+        print("\nPreparing prompts...")
+        points, boxes, masks, flag_examples = self.prepare_prompts(batched_input)
+        
+        print("\nPreparing class embeddings...")
+        class_embeddings = {
+            ResultDict.CLASS_EMBS: pe_result[ResultDict.CLASS_EMBS],
+            ResultDict.EXAMPLES_CLASS_EMBS: pe_result[ResultDict.CLASS_EMBS].unsqueeze(1).repeat(1, prompt_embeddings.shape[1], 1, 1)
+        }
+        
+        print("\nExecuting mask decoder...")
+        seg = self.mask_decoder(
+            query_embeddings=query_embeddings,
+            support_embeddings=prompt_embeddings,
+            image_pe=self.get_dense_pe(),
+            class_embeddings=class_embeddings,
+            flag_examples=flag_examples,
+        )
+        self.print_tensor_info(seg, "Decoder output")
+        
+        print("\nCleaning up intermediates...")
+        del query_embeddings, prompt_embeddings, points, boxes, masks
+        gc.collect()
+        
+        return seg
