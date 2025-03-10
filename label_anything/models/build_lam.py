@@ -25,6 +25,7 @@ from . import (
     TwoWayTransformer,
     RandomMatrixEncoder,
 )
+
 from .build_encoder import (
     build_encoder,
     build_vit_b,
@@ -82,6 +83,85 @@ def build_lam_dino_b8(**kwargs):
         build_vit_dino_b8,
         **kwargs,
     )
+	
+	
+def build_optim_lam_no_vit(**kwargs):
+    # Importazione locale per evitare l'importazione circolare
+    from label_anything.models.lam import OptimizedLam
+    print("AAAAA")
+    # Estrai i parametri specifici di OptimizedLam
+    optim_kwargs = {}
+    if 'num_iterations' in kwargs:
+        optim_kwargs['num_iterations'] = kwargs.pop('num_iterations')
+    if 'learning_rate' in kwargs:
+        optim_kwargs['learning_rate'] = kwargs.pop('learning_rate')
+    
+    # Ottieni un modello Lam normale senza ViT
+    lam = _build_lam(
+        build_vit=None,
+        use_vit=False,
+        **kwargs,
+    )
+    
+    # Crea una nuova istanza di OptimizedLam
+    optimized_lam = OptimizedLam(
+        image_size=lam.image_size,
+        image_encoder=lam.image_encoder,
+        neck=lam.neck,
+        prompt_encoder=lam.prompt_encoder,
+        mask_decoder=lam.mask_decoder,
+        custom_preprocess=lam.custom_preprocess
+    )
+    
+    # Imposta i parametri specifici dopo la creazione
+    if 'num_iterations' in optim_kwargs:
+        optimized_lam.num_iterations = optim_kwargs['num_iterations']
+    if 'learning_rate' in optim_kwargs:
+        optimized_lam.learning_rate = optim_kwargs['learning_rate']
+    
+    # Copia i pesi
+    optimized_lam.load_state_dict(lam.state_dict())
+    
+    return optimized_lam
+
+
+def build_optim_lam_vit_b(**kwargs):
+    # Importazione locale per evitare l'importazione circolare
+    from label_anything.models.lam import OptimizedLam
+    print("AAAAA")
+    # Estrai i parametri specifici di OptimizedLam
+    optim_kwargs = {}
+    if 'num_iterations' in kwargs:
+        optim_kwargs['num_iterations'] = kwargs.pop('num_iterations')
+    if 'learning_rate' in kwargs:
+        optim_kwargs['learning_rate'] = kwargs.pop('learning_rate')
+    
+    # Ottieni un modello Lam normale senza ViT
+    lam = _build_lam(
+        build_vit_b,
+        **kwargs,
+    )
+    
+    # Crea una nuova istanza di OptimizedLam
+    optimized_lam = OptimizedLam(
+        image_size=lam.image_size,
+        image_encoder=lam.image_encoder,
+        neck=lam.neck,
+        prompt_encoder=lam.prompt_encoder,
+        mask_decoder=lam.mask_decoder,
+        custom_preprocess=lam.custom_preprocess
+    )
+    
+    # Imposta i parametri specifici dopo la creazione
+    if 'num_iterations' in optim_kwargs:
+        optimized_lam.num_iterations = optim_kwargs['num_iterations']
+    if 'learning_rate' in optim_kwargs:
+        optimized_lam.learning_rate = optim_kwargs['learning_rate']
+    
+    # Copia i pesi
+    optimized_lam.load_state_dict(lam.state_dict())
+    
+    return optimized_lam
 
 def _build_lam(
     build_vit,
@@ -112,6 +192,7 @@ def _build_lam(
     dropout: float = 0.0,
     binary=False,
     custom_preprocess=True,
+	  lam_class=None, 
 ):
 
     image_embedding_size = image_size // vit_patch_size
@@ -145,7 +226,8 @@ def _build_lam(
             LayerNorm2d(embed_dim),
         )
     )
-    lam_class = BinaryLam if binary else Lam
+    if lam_class is None:
+        lam_class = BinaryLam if binary else Lam
 
     lam = lam_class(
         image_size=image_size,
